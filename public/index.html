@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="AthenaX – Fast, secure, serverless peer-to-peer file transfer powered by WebRTC." />
+  <title>AthenaX – P2P File Transfer</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ═══════════════════════ HEADER ═══════════════════════ -->
+  <header class="app-header">
+    <div class="logo-area">
+      <div class="logo-icon" aria-hidden="true">
+        <!-- SVG lightning bolt icon -->
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"
+                fill="url(#logoGrad)" stroke="none"/>
+          <defs>
+            <linearGradient id="logoGrad" x1="3" y1="2" x2="21" y2="22" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#a78bfa"/>
+              <stop offset="100%" stop-color="#38bdf8"/>
+            </linearGradient>
+          </defs>
+        </svg>
+      </div>
+      <div class="logo-text">
+        <span class="logo-name">AthenaX</span>
+        <span class="logo-tagline">Peer-to-Peer File Transfer</span>
+      </div>
+    </div>
+    <!-- Displays your own device identity -->
+    <div class="self-identity" id="self-identity">
+      <span class="identity-label">Your Device:</span>
+      <span class="identity-name" id="self-name">Connecting…</span>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════ MAIN LAYOUT ═══════════════════════ -->
+  <main class="app-main">
+
+    <!-- ──── LEFT PANEL: Peer Discovery ─────────────────────────── -->
+    <section class="panel panel-peers" aria-label="Connected Devices">
+      <div class="panel-header">
+        <h2 class="panel-title">
+          <span class="panel-icon" aria-hidden="true">🔗</span>
+          Nearby Devices
+        </h2>
+        <span class="peer-count-badge" id="peer-count">0</span>
+      </div>
+
+      <p class="hint-text" id="peer-hint">
+        Open AthenaX on another device or browser tab to see it appear here.
+      </p>
+
+      <!-- Peer list is rendered dynamically by JS -->
+      <ul class="peer-list" id="peer-list" aria-live="polite">
+        <!-- Items injected by app.js -->
+      </ul>
+
+      <!-- Live connection status indicator -->
+      <div class="server-status" id="server-status">
+        <span class="status-dot" id="status-dot"></span>
+        <span class="status-text" id="status-text">Connecting to server…</span>
+      </div>
+    </section>
+
+    <!-- ──── RIGHT PANEL: File Transfer ─────────────────────────── -->
+    <section class="panel panel-transfer" aria-label="File Transfer">
+      <div class="panel-header">
+        <h2 class="panel-title">
+          <span class="panel-icon" aria-hidden="true">📁</span>
+          Send a File
+        </h2>
+      </div>
+
+      <!-- Selected peer display -->
+      <div class="selected-peer-display" id="selected-peer-display">
+        <span class="selected-peer-label">Selected peer:</span>
+        <span class="selected-peer-name" id="selected-peer-name">None — pick a device on the left</span>
+      </div>
+
+      <!-- Drop zone / file picker -->
+      <div class="drop-zone" id="drop-zone" tabindex="0" role="button"
+           aria-label="Select or drop a file to send">
+        <div class="drop-zone-inner">
+          <div class="drop-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              <polyline points="17 8 12 3 7 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              <line x1="12" y1="3" x2="12" y2="15" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+            </svg>
+          </div>
+          <p class="drop-primary">Drag &amp; drop a file here</p>
+          <p class="drop-secondary">or click to browse</p>
+          <p class="drop-file-name" id="drop-file-name"></p>
+        </div>
+        <!-- Hidden real input -->
+        <input type="file" id="file-input" class="file-input-hidden" aria-hidden="true" tabindex="-1" />
+      </div>
+
+      <!-- Send button -->
+      <button class="btn btn-send" id="btn-send" disabled>
+        <span class="btn-icon" aria-hidden="true">⚡</span>
+        Send File
+      </button>
+
+      <!-- ──── Transfer Progress ─────────────────────────────── -->
+      <div class="progress-section" id="progress-section" hidden>
+        <div class="progress-header">
+          <span class="progress-label" id="progress-label">Preparing…</span>
+          <span class="progress-percent" id="progress-percent">0%</span>
+        </div>
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="progress-track">
+          <div class="progress-bar" id="progress-bar"></div>
+        </div>
+        <div class="progress-meta">
+          <span id="progress-bytes">0 B / 0 B</span>
+          <span id="progress-speed">-- KB/s</span>
+        </div>
+      </div>
+
+      <!-- ──── Transfer Status Log ───────────────────────────── -->
+      <div class="status-log" id="status-log">
+        <p class="log-entry log-info">🔒 All transfers are end-to-end encrypted via WebRTC.</p>
+      </div>
+
+    </section><!-- /panel-transfer -->
+
+  </main><!-- /app-main -->
+
+  <!-- ═══════════════════════ INCOMING FILE MODAL ══════════════════ -->
+  <div class="modal-overlay" id="incoming-modal" hidden role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal">
+      <div class="modal-icon" aria-hidden="true">📥</div>
+      <h3 class="modal-title" id="modal-title">Incoming File</h3>
+      <p class="modal-from" id="modal-from">From: Unknown</p>
+      <div class="modal-file-info">
+        <span class="modal-file-name" id="modal-file-name">file.txt</span>
+        <span class="modal-file-size" id="modal-file-size">--</span>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-accept" id="btn-accept">Accept</button>
+        <button class="btn btn-decline" id="btn-decline">Decline</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hidden anchor for triggering downloads -->
+  <a id="download-anchor" style="display:none" aria-hidden="true"></a>
+
+  <!-- Socket.IO client (served automatically by the socket.io package) -->
+  <script src="/socket.io/socket.io.js"></script>
+  <!-- Main application logic -->
+  <script src="app.js"></script>
+</body>
+</html>

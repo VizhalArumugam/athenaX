@@ -1,0 +1,18 @@
+{
+  "name": "athenax",
+  "version": "1.0.0",
+  "description": "AthenaX - Browser-based peer-to-peer file transfer using WebRTC",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "license": "MIT"
+}
