@@ -19,41 +19,35 @@ const CHUNK_SIZE = 16384;          // 16 KB
 const HIGH_WATERMARK = 1 * 1024 * 1024; // 1 MB — pause if bufferedAmount exceeds this
 const LOW_WATERMARK = 256 * 1024;     // 256 KB — resume on bufferedamountlow
 
-const ICE_SERVERS = {
-    iceServers: [
-        // STUN — lets each device discover its public IP/port.
-        // Sufficient only when both peers can reach each other directly.
-        { urls: "stun:stun.l.google.com:19302" },
-        { urls: "stun:stun1.l.google.com:19302" },
-        { urls: "stun:stun2.l.google.com:19302" },
-        { urls: "stun:stun.stunprotocol.org:3478" },
+// ICE configuration is fetched from the server at connection time.
+// This keeps TURN credentials out of the public JS bundle.
+let ICE_CONFIG = null;
 
-        // TURN — relays traffic when STUN/direct fails (symmetric NAT, firewalls,
-        // mobile networks, different ISPs). Required for reliable production usage.
-        // Using Open Relay Project (free, community-hosted coturn).
-        {
-            urls: "turn:openrelay.metered.ca:80",
-            username: "openrelayproject",
-            credential: "openrelayproject",
-        },
-        {
-            urls: "turn:openrelay.metered.ca:443",
-            username: "openrelayproject",
-            credential: "openrelayproject",
-        },
-        {
-            // TCP fallback — punches through strict firewalls that block UDP
-            urls: "turn:openrelay.metered.ca:443?transport=tcp",
-            username: "openrelayproject",
-            credential: "openrelayproject",
-        },
-        {
-            urls: "turn:openrelay.metered.ca:80?transport=tcp",
-            username: "openrelayproject",
-            credential: "openrelayproject",
-        },
-    ],
-};
+/**
+ * Fetch ICE server config from our own server endpoint.
+ * Falls back to STUN-only if the server is unreachable.
+ * Result is cached after first successful fetch.
+ */
+async function getIceConfig() {
+    if (ICE_CONFIG) return ICE_CONFIG; // use cached copy
+
+    try {
+        const res = await fetch("/api/ice-servers");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        ICE_CONFIG = await res.json();
+        console.log("[ICE] Config loaded:", ICE_CONFIG.iceServers.length, "servers");
+    } catch (e) {
+        console.warn("[ICE] Could not fetch config — falling back to STUN only:", e.message);
+        ICE_CONFIG = {
+            iceServers: [
+                { urls: "stun:stun.l.google.com:19302" },
+                { urls: "stun:stun1.l.google.com:19302" },
+            ],
+        };
+    }
+    return ICE_CONFIG;
+}
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 // State
@@ -302,7 +296,8 @@ socket.on("offer", async ({ fromId, fromName, offer }) => {
     isBusy = true;
 
     closePeerConnection();
-    peerConnection = new RTCPeerConnection(ICE_SERVERS);
+    const iceConfig = await getIceConfig();
+    peerConnection = new RTCPeerConnection(iceConfig);
     setupCommonHandlers(peerConnection, fromId);
 
     // Receiver gets the data channel via ondatachannel event
@@ -463,7 +458,8 @@ el.btnSend.addEventListener("click", async () => {
 async function initiateConnection(targetId, file) {
     closePeerConnection();
 
-    peerConnection = new RTCPeerConnection(ICE_SERVERS);
+    const iceConfig = await getIceConfig();
+    peerConnection = new RTCPeerConnection(iceConfig);
     setupCommonHandlers(peerConnection, targetId);
 
     // Sender creates the DataChannel

@@ -28,6 +28,74 @@ const io = new Server(httpServer, {
 
 // ─── Static files ─────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, "public")));
+
+// ─── ICE server config endpoint ───────────────────────────────────
+/**
+ * GET /api/ice-servers
+ *
+ * Returns the RTCConfiguration.iceServers array to the client.
+ * Credentials are kept server-side so they are NEVER exposed in
+ * the public JavaScript bundle.
+ *
+ * Supports two TURN providers (configure via Render env vars):
+ *
+ * ── Option A: Metered.ca (recommended free TURN) ──────────────────
+ *   METERED_API_KEY  = your Metered app API key
+ *   METERED_APP_NAME = your Metered app hostname  (e.g. "athenax")
+ *   → credentials are fetched live from Metered's API
+ *
+ * ── Option B: Manual TURN credentials ─────────────────────────────
+ *   TURN_URL        = turn:your-turn-server.com:3478
+ *   TURN_USERNAME   = your-username
+ *   TURN_CREDENTIAL = your-credential
+ */
+app.get("/api/ice-servers", async (req, res) => {
+    const iceServers = [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun1.l.google.com:19302" },
+        { urls: "stun:stun2.l.google.com:19302" },
+    ];
+
+    // ── Option A: Metered.ca ─────────────────────────────────────
+    const meteredKey = process.env.METERED_API_KEY;
+    const meteredName = process.env.METERED_APP_NAME;
+
+    if (meteredKey && meteredName) {
+        try {
+            const url = `https://${meteredName}.metered.ca/api/v1/turn/credentials?apiKey=${meteredKey}`;
+            const resp = await fetch(url);
+            if (resp.ok) {
+                const turnServers = await resp.json();
+                iceServers.push(...turnServers);
+                console.log(`[ICE] Metered TURN: loaded ${turnServers.length} servers`);
+            } else {
+                console.error(`[ICE] Metered API returned ${resp.status}`);
+            }
+        } catch (e) {
+            console.error("[ICE] Could not reach Metered API:", e.message);
+        }
+    }
+
+    // ── Option B: Manual TURN env vars ───────────────────────────
+    const turnUrl = process.env.TURN_URL;
+    const turnUser = process.env.TURN_USERNAME;
+    const turnCred = process.env.TURN_CREDENTIAL;
+
+    if (turnUrl && turnUser && turnCred) {
+        iceServers.push({ urls: turnUrl, username: turnUser, credential: turnCred });
+        iceServers.push({ urls: turnUrl + "?transport=tcp", username: turnUser, credential: turnCred });
+        console.log("[ICE] Manual TURN server added:", turnUrl);
+    }
+
+    if (iceServers.length === 3) {
+        // Only STUN — warn that TURN is not configured
+        console.warn("[ICE] WARNING: No TURN server configured. Cross-network transfers will fail.");
+    }
+
+    res.json({ iceServers });
+});
+
+// Catch-all — must come AFTER all API routes
 app.get("*", (_req, res) =>
     res.sendFile(path.join(__dirname, "public", "index.html"))
 );
