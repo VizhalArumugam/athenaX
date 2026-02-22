@@ -1,13 +1,12 @@
 /**
- * AthenaX - Signaling Server
+ * AthenaX – Signaling Server (v2)
  *
- * This server's ONLY job is WebRTC signaling:
- *  - Assign unique, human-readable device IDs to connecting clients
- *  - Maintain and broadcast the list of connected peers
- *  - Relay offer / answer / ICE-candidate messages between peers
- *
- * No files ever pass through this server.
- * All binary data is sent directly peer-to-peer via WebRTC DataChannels.
+ * New in v2:
+ *  - Tracks each peer's mode: "none" | "sender" | "receiver"
+ *  - When a client sets its mode, the peer list broadcast is filtered:
+ *      → Senders see only receivers
+ *      → Receivers see nothing (they wait)
+ *  - All WebRTC relay logic (offer/answer/ICE) unchanged
  */
 
 "use strict";
@@ -18,158 +17,120 @@ const { Server } = require("socket.io");
 const path = require("path");
 const { randomBytes } = require("crypto");
 
-// ─────────────────────────────────────────────────────────────────────────────
-// App bootstrap
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ─── App bootstrap ────────────────────────────────────────────────
 const app = express();
 const httpServer = http.createServer(app);
 
-// Allow Socket.IO requests from any origin so the app works behind a CDN /
-// reverse proxy that may serve the frontend from a different origin.
 const io = new Server(httpServer, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-  },
-  // Increase the maximum payload size to accommodate large signaling messages.
-  maxHttpBufferSize: 1e6, // 1 MB
+    cors: { origin: "*", methods: ["GET", "POST"] },
+    maxHttpBufferSize: 1e6,
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Static file serving
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ─── Static files ─────────────────────────────────────────────────
 app.use(express.static(path.join(__dirname, "public")));
+app.get("*", (_req, res) =>
+    res.sendFile(path.join(__dirname, "public", "index.html"))
+);
 
-// Catch-all: always serve index.html for any unknown GET route
-// (useful if the user navigates directly to a deep link).
-app.get("*", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Peer registry
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Map<socketId, { id: string, name: string }>
- * Keeps track of every connected client.
- */
+// ─── Peer registry ────────────────────────────────────────────────
+/** Map<socketId, { id, name, mode: "none"|"sender"|"receiver" }> */
 const peers = new Map();
 
-/**
- * Adjectives and nouns used to build human-readable device names like
- * "Swift-Falcon-3A".  We avoid generating UUIDs so device names are easier
- * to distinguish in the UI.
- */
-const ADJECTIVES = [
-  "Swift", "Bold", "Calm", "Dark", "Epic", "Fast", "Glow",
-  "Iron", "Jade", "Keen", "Lush", "Mist", "Nova", "Onyx",
-  "Pure", "Raze", "Sage", "Teal", "Vast", "Wild",
-];
-const NOUNS = [
-  "Falcon", "Ghost", "Hawk", "Iris", "Jade", "Kite", "Lynx",
-  "Mist", "Nexus", "Orb", "Pulse", "Quest", "Raven", "Star",
-  "Titan", "Ultra", "Viper", "Wolf", "Xenon", "Zeal",
-];
+const ADJECTIVES = ["Swift", "Bold", "Calm", "Dark", "Epic", "Fast", "Glow", "Iron", "Jade", "Keen", "Lush", "Mist", "Nova", "Onyx", "Pure", "Sage", "Teal", "Vast", "Wild", "Zeal"];
+const NOUNS = ["Falcon", "Ghost", "Hawk", "Iris", "Kite", "Lynx", "Nexus", "Orb", "Pulse", "Raven", "Star", "Titan", "Viper", "Wolf", "Xenon", "Blaze", "Cruz", "Dart", "Edge", "Flux"];
 
-/**
- * Generates a unique, human-readable device name.
- * e.g. "Swift-Falcon-4B"
- */
 function generateDeviceName() {
-  const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
-  const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
-  const suffix = randomBytes(1).toString("hex").toUpperCase();
-  return `${adj}-${noun}-${suffix}`;
+    const adj = ADJECTIVES[Math.floor(Math.random() * ADJECTIVES.length)];
+    const noun = NOUNS[Math.floor(Math.random() * NOUNS.length)];
+    const suffix = randomBytes(1).toString("hex").toUpperCase();
+    return `${adj}-${noun}-${suffix}`;
 }
 
 /**
- * Returns a serializable snapshot of all connected peers.
+ * Build the peer list that a specific socket should see.
+ *  - Senders see all receivers (mode === "receiver")
+ *  - Everyone else sees an empty list (they haven't picked a mode yet,
+ *    or they are a receiver waiting passively)
  */
-function getPeerList() {
-  return Array.from(peers.values());
+function getPeerListFor(socketId) {
+    const self = peers.get(socketId);
+    if (!self || self.mode !== "sender") return [];
+    return Array.from(peers.values()).filter(
+        (p) => p.id !== socketId && p.mode === "receiver"
+    );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Socket.IO event handling
-// ─────────────────────────────────────────────────────────────────────────────
+/** Broadcast updated peer lists to every connected client. */
+function broadcastPeerLists() {
+    for (const [socketId] of peers) {
+        io.to(socketId).emit("peer-list", getPeerListFor(socketId));
+    }
+}
 
+// ─── Socket.IO events ─────────────────────────────────────────────
 io.on("connection", (socket) => {
-  // Assign a unique, human-readable name to this device.
-  const deviceName = generateDeviceName();
-  peers.set(socket.id, { id: socket.id, name: deviceName });
+    const name = generateDeviceName();
+    peers.set(socket.id, { id: socket.id, name, mode: "none" });
 
-  console.log(`[+] Connected: "${deviceName}" (${socket.id})`);
+    console.log(`[+] ${name} (${socket.id})`);
 
-  // 1. Tell the newcomer its own identity so the UI can display it.
-  socket.emit("self-identity", { id: socket.id, name: deviceName });
+    // Tell the client its own identity
+    socket.emit("self-identity", { id: socket.id, name });
 
-  // 2. Broadcast the updated peer list to EVERYONE (including the newcomer).
-  io.emit("peer-list", getPeerList());
+    // Broadcast updated lists (new peer hasn't chosen a mode yet — no list change visible to others)
+    broadcastPeerLists();
 
-  // ── WebRTC Signaling relay ────────────────────────────────────────────────
+    // ── Mode selection ──────────────────────────────────────────────
+    // Client emits this when the user clicks Send or Receive
+    socket.on("set-mode", (mode) => {
+        const peer = peers.get(socket.id);
+        if (!peer) return;
+        if (mode !== "sender" && mode !== "receiver") return;
 
-  /**
-   * A peer wants to establish a connection → sends an SDP offer.
-   * We relay it to the target peer (identified by targetId).
-   *
-   * Payload: { targetId: string, offer: RTCSessionDescriptionInit }
-   */
-  socket.on("offer", ({ targetId, offer }) => {
-    if (!peers.has(targetId)) return; // target has disconnected
-    socket.to(targetId).emit("offer", {
-      fromId: socket.id,
-      fromName: peers.get(socket.id)?.name,
-      offer,
+        peer.mode = mode;
+        console.log(`[~] ${peer.name} set mode: ${mode}`);
+
+        // Tell the client its confirmed mode
+        socket.emit("mode-confirmed", mode);
+
+        // Rebroadcast lists — a new receiver may now appear for senders
+        broadcastPeerLists();
     });
-  });
 
-  /**
-   * The responder sends its SDP answer back to the initiator.
-   *
-   * Payload: { targetId: string, answer: RTCSessionDescriptionInit }
-   */
-  socket.on("answer", ({ targetId, answer }) => {
-    if (!peers.has(targetId)) return;
-    socket.to(targetId).emit("answer", {
-      fromId: socket.id,
-      answer,
+    // ── WebRTC Signaling relay ──────────────────────────────────────
+
+    socket.on("offer", ({ targetId, offer }) => {
+        if (!peers.has(targetId)) return;
+        const from = peers.get(socket.id);
+        socket.to(targetId).emit("offer", {
+            fromId: socket.id,
+            fromName: from?.name ?? "Unknown",
+            offer,
+        });
     });
-  });
 
-  /**
-   * Exchange ICE candidates between peers.
-   *
-   * Payload: { targetId: string, candidate: RTCIceCandidateInit }
-   */
-  socket.on("ice-candidate", ({ targetId, candidate }) => {
-    if (!peers.has(targetId)) return;
-    socket.to(targetId).emit("ice-candidate", {
-      fromId: socket.id,
-      candidate,
+    socket.on("answer", ({ targetId, answer }) => {
+        if (!peers.has(targetId)) return;
+        socket.to(targetId).emit("answer", { fromId: socket.id, answer });
     });
-  });
 
-  // ── Disconnect cleanup ─────────────────────────────────────────────────────
+    socket.on("ice-candidate", ({ targetId, candidate }) => {
+        if (!peers.has(targetId)) return;
+        socket.to(targetId).emit("ice-candidate", { fromId: socket.id, candidate });
+    });
 
-  socket.on("disconnect", (reason) => {
-    const peer = peers.get(socket.id);
-    console.log(`[-] Disconnected: "${peer?.name}" (${socket.id}) — ${reason}`);
-    peers.delete(socket.id);
-
-    // Notify remaining peers so they can update their UI.
-    io.emit("peer-list", getPeerList());
-  });
+    // ── Disconnect ──────────────────────────────────────────────────
+    socket.on("disconnect", (reason) => {
+        const peer = peers.get(socket.id);
+        console.log(`[-] ${peer?.name} (${socket.id}) — ${reason}`);
+        peers.delete(socket.id);
+        broadcastPeerLists();
+    });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Start the HTTP server
-// ─────────────────────────────────────────────────────────────────────────────
-
+// ─── Start ────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
-  console.log(`\nAthenaX signaling server running on port ${PORT}`);
-  console.log(`Open http://localhost:${PORT} to use the app locally.\n`);
+    console.log(`\nAthenaX v2 signaling server on port ${PORT}`);
+    console.log(`Local: http://localhost:${PORT}\n`);
 });
