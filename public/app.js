@@ -21,10 +21,37 @@ const LOW_WATERMARK = 256 * 1024;     // 256 KB — resume on bufferedamountlow
 
 const ICE_SERVERS = {
     iceServers: [
+        // STUN — lets each device discover its public IP/port.
+        // Sufficient only when both peers can reach each other directly.
         { urls: "stun:stun.l.google.com:19302" },
         { urls: "stun:stun1.l.google.com:19302" },
         { urls: "stun:stun2.l.google.com:19302" },
         { urls: "stun:stun.stunprotocol.org:3478" },
+
+        // TURN — relays traffic when STUN/direct fails (symmetric NAT, firewalls,
+        // mobile networks, different ISPs). Required for reliable production usage.
+        // Using Open Relay Project (free, community-hosted coturn).
+        {
+            urls: "turn:openrelay.metered.ca:80",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+        },
+        {
+            urls: "turn:openrelay.metered.ca:443",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+        },
+        {
+            // TCP fallback — punches through strict firewalls that block UDP
+            urls: "turn:openrelay.metered.ca:443?transport=tcp",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+        },
+        {
+            urls: "turn:openrelay.metered.ca:80?transport=tcp",
+            username: "openrelayproject",
+            credential: "openrelayproject",
+        },
     ],
 };
 
