@@ -512,44 +512,51 @@ const elExitModal = document.getElementById("exit-modal");
 const elBtnStay = document.getElementById("btn-exit-stay");
 const elBtnLeave = document.getElementById("btn-exit-leave");
 
-/**
- * Push a dummy history entry so that the mobile back-swipe fires `popstate`
- * instead of navigating away from the page.
- * Call this as soon as isBusy becomes true.
- */
-function blockNavigation() {
-    if (!history.state?.athenaxBlock) {
-        history.pushState({ athenaxBlock: true }, "");
+// ─── CRITICAL: Push a guard state immediately on page load ───────────────────
+//
+// Problem: when a user opens the app directly (typing URL, Google search, link)
+// there is NO previous history entry. So the first swipe-back gesture has nothing
+// to fire `popstate` on — it just exits the app, bypassing all our guards.
+//
+// Fix: replace the current history state with a marker, then push an active guard
+// entry on top. Now history always has at least 2 entries:
+//   [page-load-marker]  ← if user exits this, they genuinely leave
+//   [athenax-guard]     ← first back-swipe hits this → fires popstate → we intercept
+//
+history.replaceState({ athenaxMark: true }, "");   // mark the real landing entry
+history.pushState({ athenaxGuard: true }, "");      // push our interceptable guard
+
+// blockNavigation / unblockNavigation are kept for call-site compatibility
+// but are now effectively no-ops because the guard is always present on load.
+function blockNavigation() { /* guard already pushed on page load */ }
+function unblockNavigation() { /* guard stays for the session lifetime */ }
+
+function showExitModal() { elExitModal.hidden = false; }
+function hideExitModal() { elExitModal.hidden = true; }
+
+// ─── popstate: fires on every back-swipe / back-button press ────────────────
+window.addEventListener("popstate", (e) => {
+    if (isBusy) {
+        // Transfer in progress — intercept and show in-app modal.
+        // Re-push the guard so the page stays put.
+        history.pushState({ athenaxGuard: true }, "");
+        showExitModal();
+        return;
     }
-}
 
-/**
- * Remove the dummy history entry we pushed.
- * Call this when the transfer completes or is cancelled normally.
- */
-function unblockNavigation() {
-    if (history.state?.athenaxBlock) {
-        history.back(); // pops our dummy entry
+    // No transfer active.
+    if (myMode !== null) {
+        // User is in sender or receiver view — still intercept so they don't
+        // accidentally swipe out of the app mid-session (no transfer cost).
+        // Re-push guard silently; they can use the "⇄ Change" button to exit.
+        history.pushState({ athenaxGuard: true }, "");
+        return;
     }
-}
 
-function showExitModal() {
-    elExitModal.hidden = false;
-}
-
-function hideExitModal() {
-    elExitModal.hidden = true;
-}
-
-// Mobile swipe-back / desktop back-button → popstate fires on our dummy entry
-window.addEventListener("popstate", () => {
-    if (!isBusy) return; // no transfer → allow navigation normally
-
-    // Re-push our block so the page doesn't navigate away
-    history.pushState({ athenaxBlock: true }, "");
-
-    // Show the in-app modal instead
-    showExitModal();
+    // User is on the mode-selection screen (myMode === null).
+    // They have not started any session — let them leave normally.
+    // Pop back to our marker so the *next* back exits the app.
+    // (No re-push here → popstate will fire once more → hits athenaxMark → exits.)
 });
 
 // "Continue Transfer" — dismiss modal, stay on page
@@ -560,15 +567,21 @@ elBtnStay.addEventListener("click", () => {
 // "Cancel & Exit" — cancel transfer, navigate back
 elBtnLeave.addEventListener("click", () => {
     hideExitModal();
-    isBusy = false; // allow popstate to pass through
+    isBusy = false;
+    myMode = null; // allow next popstate to exit normally
 
     // Notify receiver that sender cancelled (if sender)
-    if (myMode === "sender" && selectedPeerId) {
+    if (selectedPeerId) {
         socket.emit("transfer-cancel", { targetId: selectedPeerId });
     }
 
-    // Pop our dummy state so history.back() goes to the real previous page
-    history.go(-2); // -1 for our re-push, -1 for original block
+    // history stack at this point:
+    //   [athenaxMark]  ← real landing entry
+    //   [athenaxGuard] ← original guard pushed on load
+    //   [athenaxGuard] ← re-pushed by popstate handler
+    // go(-2) pops the two guard entries → lands on athenaxMark
+    // next swipe-back exits the app normally
+    history.go(-2);
 });
 
 // Fallback for desktop: browser "Leave site?" dialog on refresh / tab close
