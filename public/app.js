@@ -19,8 +19,12 @@
 // Constants
 // ──────────────────────────────────────────────────────────────────────────────
 
-// 256 KB per chunk — Socket.IO can handle this well within its 300 KB limit
-const CHUNK_SIZE = 256 * 1024;
+// 512 KB per chunk — larger chunks = fewer round-trips = faster transfers
+const CHUNK_SIZE = 512 * 1024;
+
+// How many chunks to send concurrently before waiting for their ACKs.
+// PIPELINE=4 gives ~4x throughput vs sequential send-one-wait-for-ack.
+const PIPELINE = 4;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // State
@@ -356,6 +360,9 @@ function selectPeer(id, name) {
 el.fileInput.addEventListener("change", () => {
     if (el.fileInput.files[0]) handleFileSelected(el.fileInput.files[0]);
 });
+// Stop the native click on the hidden file input from bubbling to the drop zone,
+// which would trigger a second dialog via the dropZone click handler below.
+el.fileInput.addEventListener("click", (e) => e.stopPropagation());
 el.dropZone.addEventListener("click", () => el.fileInput.click());
 el.dropZone.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") el.fileInput.click();
@@ -421,43 +428,65 @@ async function sendFileViaSockets(targetId, file) {
     // Give receiver time to set up state (~100 ms is plenty)
     await delay(150);
 
-    // Step 2 — chunk loop
+    // Step 2 — chunk loop (pipelined: PIPELINE chunks in-flight at once)
     let offset = 0;
     let chunkIndex = 0;
+    let cancelled = false;
 
     function readChunk(start) {
         return new Promise((resolve, reject) => {
             const fr = new FileReader();
-            fr.onload = () => resolve(fr.result); // ArrayBuffer
+            fr.onload = () => resolve(fr.result);
             fr.onerror = () => reject(fr.error);
-            fr.readAsArrayBuffer(file.slice(start, start + CHUNK_SIZE));
+            fr.readAsArrayBuffer(file.slice(start, Math.min(start + CHUNK_SIZE, file.size)));
         });
     }
 
-    while (offset < file.size) {
-        let chunk;
-        try { chunk = await readChunk(offset); }
-        catch (e) { log(`Read error: ${e.message}`, "error"); resetTransferUI(); return; }
+    while (offset < file.size && !cancelled) {
+        // Build a batch of up to PIPELINE chunks
+        const batch = [];
+        for (let i = 0; i < PIPELINE && offset < file.size; i++) {
+            batch.push({ start: offset, idx: chunkIndex });
+            offset += CHUNK_SIZE;
+            chunkIndex++;
+        }
 
-        // Emit chunk, wait for server ACK (backpressure)
-        const ack = await new Promise((resolve) => {
-            socket.emit("file-chunk", { targetId, chunk, chunkIndex }, resolve);
-        });
-
-        if (ack === "no-peer") {
-            log("Receiver disconnected during transfer.", "error");
+        // Read all chunks in this batch concurrently, then send them concurrently
+        let batchChunks;
+        try {
+            batchChunks = await Promise.all(batch.map(({ start }) => readChunk(start)));
+        } catch (e) {
+            log(`Read error: ${e.message}`, "error");
             resetTransferUI();
             return;
         }
 
-        offset += chunk.byteLength;
-        bytesSent += chunk.byteLength;
-        chunkIndex++;
+        // Send all chunks in this batch concurrently, each with its own ACK
+        const results = await Promise.all(
+            batchChunks.map((chunk, i) =>
+                new Promise((resolve) => {
+                    socket.emit("file-chunk", { targetId, chunk, chunkIndex: batch[i].idx }, resolve);
+                })
+            )
+        );
 
+        // If any chunk reports peer disconnected, abort
+        if (results.includes("no-peer")) {
+            log("Receiver disconnected during transfer.", "error");
+            resetTransferUI();
+            cancelled = true;
+            return;
+        }
+
+        // Update progress with actual bytes sent in this batch
+        const batchBytes = batchChunks.reduce((sum, c) => sum + c.byteLength, 0);
+        bytesSent += batchBytes;
         const elapsed = (Date.now() - sendStartTime) / 1000;
         const speed = elapsed > 0 ? bytesSent / elapsed : 0;
         updateSendProgress(`Sending "${file.name}"…`, bytesSent, file.size, speed);
     }
+
+    if (cancelled) return;
 
     // Step 3 — done signal
     socket.emit("transfer-done", { targetId });
@@ -471,6 +500,19 @@ async function sendFileViaSockets(targetId, file) {
 function delay(ms) {
     return new Promise((r) => setTimeout(r, ms));
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Unload warning — fires native browser "Leave site?" dialog during transfer
+// ──────────────────────────────────────────────────────────────────────────────
+
+// When a transfer is active, ask the user before closing/refreshing.
+// Note: modern browsers show a generic "Changes you made may not be saved"
+// message — custom text in returnValue is ignored but the block still works.
+window.addEventListener("beforeunload", (e) => {
+    if (!isBusy) return;
+    e.preventDefault();
+    e.returnValue = "";
+});
 
 // ──────────────────────────────────────────────────────────────────────────────
 // RECEIVER — Assembly & Download

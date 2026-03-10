@@ -28,8 +28,8 @@ const httpServer = http.createServer(app);
 
 const io = new Server(httpServer, {
     cors: { origin: "*", methods: ["GET", "POST"] },
-    // Allow chunks up to 256 KB + envelope overhead
-    maxHttpBufferSize: 300 * 1024,
+    // Allow chunks up to 512 KB + envelope overhead (4x pipeline)
+    maxHttpBufferSize: 600 * 1024,
 });
 
 // ─── Static files ─────────────────────────────────────────────────
