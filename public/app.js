@@ -165,6 +165,7 @@ function updateRecvProgress(label, done, total, speed) {
 
 function resetTransferUI() {
     isBusy = false;
+    unblockNavigation(); // pop the history state we pushed on send start
     el.btnSend.disabled = !(selectedPeerId && selectedFile);
 }
 
@@ -258,6 +259,7 @@ socket.on("transfer-incoming", ({ fromId, fromName, meta }) => {
     }
 
     isBusy = true;
+    blockNavigation(); // push history state so swipe-back triggers modal
     rx.active = true;
     rx.meta = meta;
     rx.chunks = [];
@@ -394,6 +396,7 @@ function handleFileSelected(file) {
 el.btnSend.addEventListener("click", () => {
     if (!selectedPeerId || !selectedFile || isBusy) return;
     isBusy = true;
+    blockNavigation(); // push history state so swipe-back triggers modal
     el.btnSend.disabled = true;
     sendFileViaSockets(selectedPeerId, selectedFile);
 });
@@ -502,12 +505,73 @@ function delay(ms) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Unload warning — fires native browser "Leave site?" dialog during transfer
+// In-App Exit Confirmation (History API — works on mobile swipe-back)
 // ──────────────────────────────────────────────────────────────────────────────
 
-// When a transfer is active, ask the user before closing/refreshing.
-// Note: modern browsers show a generic "Changes you made may not be saved"
-// message — custom text in returnValue is ignored but the block still works.
+const elExitModal = document.getElementById("exit-modal");
+const elBtnStay = document.getElementById("btn-exit-stay");
+const elBtnLeave = document.getElementById("btn-exit-leave");
+
+/**
+ * Push a dummy history entry so that the mobile back-swipe fires `popstate`
+ * instead of navigating away from the page.
+ * Call this as soon as isBusy becomes true.
+ */
+function blockNavigation() {
+    if (!history.state?.athenaxBlock) {
+        history.pushState({ athenaxBlock: true }, "");
+    }
+}
+
+/**
+ * Remove the dummy history entry we pushed.
+ * Call this when the transfer completes or is cancelled normally.
+ */
+function unblockNavigation() {
+    if (history.state?.athenaxBlock) {
+        history.back(); // pops our dummy entry
+    }
+}
+
+function showExitModal() {
+    elExitModal.hidden = false;
+}
+
+function hideExitModal() {
+    elExitModal.hidden = true;
+}
+
+// Mobile swipe-back / desktop back-button → popstate fires on our dummy entry
+window.addEventListener("popstate", () => {
+    if (!isBusy) return; // no transfer → allow navigation normally
+
+    // Re-push our block so the page doesn't navigate away
+    history.pushState({ athenaxBlock: true }, "");
+
+    // Show the in-app modal instead
+    showExitModal();
+});
+
+// "Continue Transfer" — dismiss modal, stay on page
+elBtnStay.addEventListener("click", () => {
+    hideExitModal();
+});
+
+// "Cancel & Exit" — cancel transfer, navigate back
+elBtnLeave.addEventListener("click", () => {
+    hideExitModal();
+    isBusy = false; // allow popstate to pass through
+
+    // Notify receiver that sender cancelled (if sender)
+    if (myMode === "sender" && selectedPeerId) {
+        socket.emit("transfer-cancel", { targetId: selectedPeerId });
+    }
+
+    // Pop our dummy state so history.back() goes to the real previous page
+    history.go(-2); // -1 for our re-push, -1 for original block
+});
+
+// Fallback for desktop: browser "Leave site?" dialog on refresh / tab close
 window.addEventListener("beforeunload", (e) => {
     if (!isBusy) return;
     e.preventDefault();
@@ -541,6 +605,7 @@ function assembleAndDownload() {
 
     resetReceive();
     isBusy = false;
+    unblockNavigation(); // pop the history state we pushed on incoming
 }
 
 function resetReceive() {
