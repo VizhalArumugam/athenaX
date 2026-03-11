@@ -19,12 +19,13 @@
 // Constants
 // ──────────────────────────────────────────────────────────────────────────────
 
-// 512 KB per chunk — larger chunks = fewer round-trips = faster transfers
-const CHUNK_SIZE = 512 * 1024;
+// 2 MB chunks — 4x larger than before: fewer ACK round-trips, better TCP throughput
+const CHUNK_SIZE   = 2 * 1024 * 1024;
 
-// How many chunks to send concurrently before waiting for their ACKs.
-// PIPELINE=4 gives ~4x throughput vs sequential send-one-wait-for-ack.
-const PIPELINE = 4;
+// Sliding-window size: how many chunks can be outstanding (sent but not yet ACKed).
+// As each ACK arrives a new chunk fires immediately — no batch stalling.
+// 32 × 2 MB = 64 MB in-flight, saturates even a 1 Gbps link at 100 ms RTT.
+const MAX_INFLIGHT = 32;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // State
@@ -402,23 +403,23 @@ el.btnSend.addEventListener("click", () => {
 });
 
 /**
- * Sends a file through the Socket.IO relay.
+ * sendFileViaSockets — high-throughput Socket.IO relay sender.
  *
- * Algorithm:
- *  1. Emit transfer-request (metadata) to receiver.
- *  2. Read file in 256 KB slices with FileReader.
- *  3. For each chunk: emit file-chunk, AWAIT server ACK before reading next chunk.
- *     This prevents flooding (natural backpressure).
- *  4. Emit transfer-done.
+ * Key design choices vs the old batch-and-wait:
+ *  • Blob.arrayBuffer()  — native async read, ~3× faster than FileReader
+ *  • Sliding window      — MAX_INFLIGHT chunks outstanding simultaneously;
+ *                          each ACK immediately triggers next send (no stall).
+ *  • 2 MB chunks         — 4× larger; fewer round-trips, better TCP utilisation.
+ *  • UI throttled        — DOM updates capped at 10/s (no perf drag on large files)
  */
 async function sendFileViaSockets(targetId, file) {
     sendStartTime = Date.now();
-    bytesSent = 0;
+    bytesSent     = 0;
 
-    log(`Sending "${file.name}" to ${selectedPeerName}…`, "info");
-    updateSendProgress("Connecting…", 0, file.size, 0);
+    log(`Sending "${file.name}" (${formatBytes(file.size)}) to ${selectedPeerName}…`, "info");
+    updateSendProgress("Preparing…", 0, file.size, 0);
 
-    // Step 1 — metadata
+    // ── 1. Metadata ────────────────────────────────────────────────────────────
     socket.emit("transfer-request", {
         targetId,
         meta: {
@@ -427,82 +428,98 @@ async function sendFileViaSockets(targetId, file) {
             fileType: file.type || "application/octet-stream",
         },
     });
+    await delay(100); // brief pause so receiver initialises state
 
-    // Give receiver time to set up state (~100 ms is plenty)
-    await delay(150);
-
-    // Step 2 — chunk loop (pipelined: PIPELINE chunks in-flight at once)
-    let offset = 0;
+    // ── 2. Sliding-window chunk loop ───────────────────────────────────────────
+    let offset     = 0;
     let chunkIndex = 0;
-    let cancelled = false;
+    let inFlight   = 0;   // chunks sent but not yet ACKed by server
+    let cancelled  = false;
+    let loopDone   = false;
+    let lastUIMs   = 0;   // for 10/s UI throttle
 
-    function readChunk(start) {
-        return new Promise((resolve, reject) => {
-            const fr = new FileReader();
-            fr.onload = () => resolve(fr.result);
-            fr.onerror = () => reject(fr.error);
-            fr.readAsArrayBuffer(file.slice(start, Math.min(start + CHUNK_SIZE, file.size)));
-        });
+    // Single-waiter semaphore: resolves when a window slot opens
+    let windowWaiter = null;
+    function freeSlot() {
+        inFlight--;
+        if (windowWaiter) { const r = windowWaiter; windowWaiter = null; r(); }
+    }
+    function waitForSlot() {
+        if (inFlight < MAX_INFLIGHT) return Promise.resolve();
+        return new Promise(r => { windowWaiter = r; });
     }
 
-    while (offset < file.size && !cancelled) {
-        // Build a batch of up to PIPELINE chunks
-        const batch = [];
-        for (let i = 0; i < PIPELINE && offset < file.size; i++) {
-            batch.push({ start: offset, idx: chunkIndex });
-            offset += CHUNK_SIZE;
-            chunkIndex++;
+    // Outer promise: resolves when every chunk is ACKed
+    let resolveDone, rejectDone;
+    const allAcked = new Promise((res, rej) => { resolveDone = res; rejectDone = rej; });
+
+    // ── Send loop (runs concurrently with ACK callbacks) ──────────────────────
+    (async () => {
+        while (offset < file.size && !cancelled) {
+            await waitForSlot();
+            if (cancelled) break;
+
+            // Blob.arrayBuffer(): native, no FileReader object overhead
+            const end = Math.min(offset + CHUNK_SIZE, file.size);
+            const chunk = await file.slice(offset, end).arrayBuffer().catch(e => {
+                log(`Read error: ${e.message}`, "error");
+                cancelled = true;
+                return null;
+            });
+            if (!chunk || cancelled) break;
+
+            const idx = chunkIndex++;
+            offset   += chunk.byteLength;
+            inFlight++;
+
+            // Fire and continue — ACK callback below frees the window slot
+            socket.emit("file-chunk", { targetId, chunk, chunkIndex: idx }, (ack) => {
+                if (ack === "no-peer") {
+                    cancelled = true;
+                    rejectDone(new Error("no-peer"));
+                    return;
+                }
+                freeSlot();
+
+                // Throttled UI update — max 10 repaints/second
+                const now = Date.now();
+                if (now - lastUIMs > 100) {
+                    lastUIMs = now;
+                    const elapsed = (now - sendStartTime) / 1000;
+                    const speed   = elapsed > 0 ? offset / elapsed : 0;
+                    updateSendProgress(`Sending "${file.name}"…`, Math.min(offset, file.size), file.size, speed);
+                }
+
+                if (loopDone && inFlight === 0) resolveDone();
+            });
         }
+        loopDone = true;
+        if (inFlight === 0 && !cancelled) resolveDone();
+    })();
 
-        // Read all chunks in this batch concurrently, then send them concurrently
-        let batchChunks;
-        try {
-            batchChunks = await Promise.all(batch.map(({ start }) => readChunk(start)));
-        } catch (e) {
-            log(`Read error: ${e.message}`, "error");
-            resetTransferUI();
-            return;
-        }
-
-        // Send all chunks in this batch concurrently, each with its own ACK
-        const results = await Promise.all(
-            batchChunks.map((chunk, i) =>
-                new Promise((resolve) => {
-                    socket.emit("file-chunk", { targetId, chunk, chunkIndex: batch[i].idx }, resolve);
-                })
-            )
-        );
-
-        // If any chunk reports peer disconnected, abort
-        if (results.includes("no-peer")) {
-            log("Receiver disconnected during transfer.", "error");
-            resetTransferUI();
-            cancelled = true;
-            return;
-        }
-
-        // Update progress with actual bytes sent in this batch
-        const batchBytes = batchChunks.reduce((sum, c) => sum + c.byteLength, 0);
-        bytesSent += batchBytes;
-        const elapsed = (Date.now() - sendStartTime) / 1000;
-        const speed = elapsed > 0 ? bytesSent / elapsed : 0;
-        updateSendProgress(`Sending "${file.name}"…`, bytesSent, file.size, speed);
+    // ── Wait for completion ────────────────────────────────────────────────────
+    try {
+        await allAcked;
+    } catch (e) {
+        const msg = e.message === "no-peer" ? "Receiver disconnected during transfer." : `Transfer error: ${e.message}`;
+        log(msg, "error");
+        resetTransferUI();
+        return;
     }
+    if (cancelled) { resetTransferUI(); return; }
 
-    if (cancelled) return;
-
-    // Step 3 — done signal
+    // ── 3. Done signal ─────────────────────────────────────────────────────────
     socket.emit("transfer-done", { targetId });
 
-    const sec = ((Date.now() - sendStartTime) / 1000).toFixed(1);
-    log(`✅ "${file.name}" sent in ${sec}s`, "success");
+    const sec    = ((Date.now() - sendStartTime) / 1000).toFixed(1);
+    const avgSpd = formatBytes(file.size / parseFloat(sec));
+    log(`✅ "${file.name}" sent in ${sec}s  (avg ${avgSpd}/s)`, "success");
     updateSendProgress("Transfer complete! ✅", file.size, file.size, 0);
     resetTransferUI();
 }
 
-function delay(ms) {
-    return new Promise((r) => setTimeout(r, ms));
-}
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 
 // ──────────────────────────────────────────────────────────────────────────────
 // In-App Exit Confirmation (History API — works on mobile swipe-back)
