@@ -1,11 +1,14 @@
 {
   "name": "athenax",
-  "version": "1.0.0",
-  "description": "AthenaX - Browser-based peer-to-peer file transfer using WebRTC",
+  "version": "4.0.0",
+  "description": "AthenaX – High-speed P2P file transfer (React + REST API + Socket.IO)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev:server": "node server.js",
+    "dev:client": "cd client && npm run dev",
+    "build": "cd client && npm run build",
+    "postinstall": "cd client && npm install"
   },
   "dependencies": {
     "express": "^4.18.2",
